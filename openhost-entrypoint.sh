@@ -5,28 +5,28 @@
 # Bridge between the OpenHost app contract and the upstream
 # linuxserver/webtop container. Responsibilities:
 #
-#   1. If the OpenHost-managed persistent directory
-#      ($OPENHOST_APP_DATA_DIR) is empty, seed it with the upstream
-#      /config baseline so webtop's abc user has a working home.
-#   2. Bind-mount $OPENHOST_APP_DATA_DIR over /config so all of webtop's
-#      writes land on the OpenHost persistent volume. (A symlink would
-#      be simpler, but the upstream Dockerfile declares /config as a
-#      VOLUME, which makes it a kernel mountpoint at runtime. You cannot
-#      rm or replace a mountpoint from inside the container, so we
-#      bind-mount on top of it instead.)
-#   3. chown the persistent dir to $PUID:$PGID (default 911:911, the abc
-#      user) so upstream services can write there. The chown runs once
-#      per container start (skipped if a marker in /run says we already
-#      did it in this lifetime, which matters when the entrypoint is
-#      re-exec'd from a diagnostic `docker exec`).
-#   4. Exec the upstream s6-overlay /init so webtop comes up normally.
+#   1. Seed OPENHOST_APP_DATA_DIR (== /config via a build-time symlink)
+#      from the baseline snapshot at /opt/webtop-baseline on first boot,
+#      when the persistent dir is empty. /config itself resolves to
+#      OPENHOST_APP_DATA_DIR (the OpenHost persistent bind mount) so
+#      everything webtop writes there goes to the persistent volume.
+#   2. chown the persistent dir to $PUID:$PGID (default 911:911, the abc
+#      user) so upstream services can write there.
+#   3. Exec the upstream s6-overlay /init so webtop comes up normally.
 #
-# Requirements (expressed in openhost.toml):
-#   - capabilities = ["SYS_ADMIN"]  -- needed for the bind mount.
+# Background: the upstream image declares `VOLUME /config`. OpenHost
+# cannot mount its persistent volume directly at /config (its manifest
+# API has no mount-destination field) and cannot relax Docker's default
+# seccomp profile to let us bind-mount inside the container. Instead,
+# the Dockerfile replaces /config with a symlink to OPENHOST_APP_DATA_DIR
+# at build time, so VOLUME /config is resolved to the symlink target at
+# `docker run` and OpenHost's own `-v` bind mount wins against the
+# anonymous volume Docker would otherwise create. Net result: /config
+# and OPENHOST_APP_DATA_DIR are the same directory at runtime.
 #
-# Failure policy: fail loud. A partially bridged /config would result in
-# a desktop that appears to work but loses all user state on restart, so
-# we prefer a visible container crash over a silent data leak.
+# Failure policy: fail loud. A partially seeded persistent dir would
+# produce a broken desktop with no clear error, so we prefer a visible
+# container crash over silent misbehavior.
 
 set -euo pipefail
 
@@ -40,11 +40,10 @@ die() {
 # (including dotfiles), 1 if it is empty or does not exist.
 #
 # Important: this function is called from `if` conditions, where bash
-# suppresses `set -e` inside the function body. We therefore check
-# find's exit status explicitly rather than relying on set -e to catch
-# failures, and bail out via `die` on unexpected errors (e.g. the
-# directory itself is unreadable) so a caller never mis-interprets a
-# transient failure as "empty".
+# suppresses `set -e` inside the function body. We therefore check the
+# critical commands' exit statuses explicitly rather than relying on
+# set -e to catch failures, and bail out via `die` on unexpected
+# errors.
 dir_has_content() {
     local dir=$1
     if [[ ! -d "$dir" ]]; then
@@ -68,8 +67,6 @@ dir_has_content() {
         rm -f "$probe"
         die "could not probe $dir for existing content (find exited $find_rc)"
     fi
-    # Translate "probe file is non-empty" to a shell exit status:
-    # 0 = directory has content, 1 = directory is empty.
     local rc=1
     if [[ -s "$probe" ]]; then
         rc=0
@@ -79,38 +76,25 @@ dir_has_content() {
     # errors on subdirs it couldn't read, provided -quit fired on
     # something readable first. We accept this because the seed step
     # only ADDS files; it never removes anything, so at worst we'd add
-    # spurious baseline files rather than lose user data. If we're
-    # killed by a signal mid-find, the probe file lingers in the
-    # container's ephemeral tmpfs until container removal -- trivial.
+    # spurious baseline files rather than lose user data.
     return "$rc"
 }
 
-# Return 0 if /config is already bind-mounted from $1 (same device and
-# inode as the source). Parsing /proc/self/mountinfo would be messier
-# because the source path sits after a variable-length optional-fields
-# section terminated by "-"; a device+inode comparison is robust across
-# kernel versions and mount-option variations.
-is_config_backed_by() {
-    local src=$1
-    if [[ ! -d /config || ! -d "$src" ]]; then
-        return 1
-    fi
-    local config_id src_id
-    config_id=$(stat -c '%d:%i' /config) || die "stat /config failed"
-    src_id=$(stat -c '%d:%i' "$src") || die "stat $src failed"
-    [[ "$config_id" == "$src_id" ]]
-}
-
 # Marker written after a successful chown of PERSIST_DIR. Lives in
-# /run, which is a tmpfs that Docker re-creates fresh on every
-# container start (both `docker run` and `docker restart`). The marker
-# therefore guards against a re-chown within a single start-to-stop
-# cycle -- important when the entrypoint is re-exec'd from a
-# diagnostic `docker exec` -- but does not survive a restart, which is
-# fine: the persistent dir might have been touched by another tool in
-# between. We keep the marker out of PERSIST_DIR so the persistent
-# volume stays clean of bookkeeping files.
+# /run, which Docker re-creates fresh on every container start (both
+# `docker run` and `docker restart`). The marker therefore guards
+# against a re-chown within a single start-to-stop cycle (important
+# when the entrypoint is re-exec'd from a diagnostic `docker exec`)
+# but does not survive a restart, which is fine: the persistent dir
+# might have been touched by another tool in between. We keep the
+# marker out of PERSIST_DIR so the persistent volume stays clean of
+# bookkeeping files.
 CHOWN_DONE_MARKER="/run/openhost-webtop-chowned"
+
+# Path where the Dockerfile stashed the baseline /config contents
+# before replacing /config with a symlink. Only used for first-boot
+# seeding.
+BASELINE_DIR="/opt/webtop-baseline"
 
 if [[ -z "${OPENHOST_APP_DATA_DIR:-}" ]]; then
     die "OPENHOST_APP_DATA_DIR is not set; refusing to start."
@@ -123,59 +107,36 @@ if ! mkdir -p "$PERSIST_DIR"; then
     die "could not create $PERSIST_DIR. Check that the OpenHost persistent volume for this app is mounted and writable."
 fi
 
-# Step 1: seed PERSIST_DIR if it is empty and /config has baseline
-# content to copy from. We never destroy existing contents of
-# PERSIST_DIR; a partial seed from a crashed prior boot is a user-
-# recoverable condition (remove and redeploy), not something we
-# auto-repair at the risk of destroying real user data.
-#
-# We do the probe BEFORE the bind mount, so /config here is the Docker
-# anonymous volume with the baseline content the image shipped.
+# /config should be a symlink to PERSIST_DIR (created by the Dockerfile).
+# Verify before we do anything else -- if it isn't, the VOLUME trick has
+# broken down and later steps would silently write to the wrong place.
+if [[ ! -L /config ]]; then
+    die "/config is not a symlink. The Dockerfile expected to replace /config with 'ln -s $PERSIST_DIR /config' at build time; something in the image has diverged from that."
+fi
+if [[ "$(readlink -f /config)" != "$(readlink -f "$PERSIST_DIR")" ]]; then
+    die "/config symlink does not resolve to $PERSIST_DIR. Got $(readlink /config) -> $(readlink -f /config)."
+fi
+
+# Step 1: seed PERSIST_DIR if it is empty and we have a baseline to
+# copy from. We never destroy existing contents of PERSIST_DIR; a
+# partial seed from a crashed prior boot is a user-recoverable
+# condition (remove and redeploy), not something we auto-repair at the
+# risk of destroying real user data.
 if dir_has_content "$PERSIST_DIR"; then
     log "Persistent dir already has user state; not reseeding from baseline"
-elif dir_has_content /config; then
-    log "Seeding empty persistent dir from /config baseline"
-    # `/config/.` copies the contents of /config (including dotfiles)
-    # into PERSIST_DIR without creating a nested /config directory.
+elif dir_has_content "$BASELINE_DIR"; then
+    log "Seeding empty persistent dir from $BASELINE_DIR"
+    # `$BASELINE_DIR/.` copies the contents (including dotfiles) into
+    # PERSIST_DIR without creating a nested baseline/ directory.
     # `-a` preserves permissions/ownership/timestamps.
-    #
-    # A failed seed leaves PERSIST_DIR non-empty, which on the next
-    # boot reads as "has user state" and skips reseeding. We report the
-    # failure with a clear message so an operator can see why the
-    # desktop never came up; recovery is "oh app remove && oh app
-    # deploy" (the partial PERSIST_DIR contents come with the --data
-    # removal).
-    if ! cp -a /config/. "$PERSIST_DIR"/; then
-        die "failed to seed persistent dir from /config baseline. PERSIST_DIR may contain a partial copy; remove the app data via 'oh app remove' and redeploy."
+    if ! cp -a "$BASELINE_DIR"/. "$PERSIST_DIR"/; then
+        die "failed to seed persistent dir from $BASELINE_DIR. PERSIST_DIR may contain a partial copy; remove the app data via 'oh app remove' and redeploy."
     fi
 else
-    log "Persistent dir is empty and /config has no baseline to seed from; continuing without seeding"
+    log "Persistent dir is empty and $BASELINE_DIR has no baseline to seed from; continuing without seeding"
 fi
 
-# Step 2: bind-mount PERSIST_DIR over /config. Skip if it is already
-# bound (detected by comparing device+inode, which is bind-mount-safe
-# and doesn't depend on parsing mountinfo).
-if is_config_backed_by "$PERSIST_DIR"; then
-    log "/config is already bind-mounted from $PERSIST_DIR"
-else
-    log "Bind-mounting $PERSIST_DIR over /config"
-    # Requires SYS_ADMIN; openhost.toml declares it. The bind shadows
-    # the Docker anonymous volume at /config for the life of this
-    # container; the anonymous volume itself is discarded when the
-    # container is removed. The most common failure here is a missing
-    # SYS_ADMIN capability, so we hint at that in the error.
-    if ! mount --bind "$PERSIST_DIR" /config; then
-        die "bind-mounting $PERSIST_DIR over /config failed. The SYS_ADMIN capability is required (see 'capabilities' in openhost.toml)."
-    fi
-fi
-
-# Belt-and-suspenders sanity check: /config must now be backed by
-# PERSIST_DIR.
-if ! is_config_backed_by "$PERSIST_DIR"; then
-    die "/config is not backed by $PERSIST_DIR after mount"
-fi
-
-# Step 3: ownership. The default PUID/PGID in the upstream image is
+# Step 2: ownership. The default PUID/PGID in the upstream image is
 # 911/911 (the abc user). Honor any caller-provided override but
 # otherwise keep the default.
 export PUID="${PUID:-911}"
@@ -188,12 +149,8 @@ else
     log "Setting ownership of $PERSIST_DIR to $PUID:$PGID"
     # Use chown -h (don't dereference symlinks) via find -exec so
     # symlinks under the user's home can't trick chown into
-    # re-targeting ownership on the symlink target. -xdev stays on the
-    # same filesystem, which covers the common case; a malicious bind
-    # mount inside PERSIST_DIR that resolves to the same device can
-    # still be traversed, but that would require root (which the
-    # desktop user has anyway inside the container), so it is not an
-    # elevation of privilege.
+    # re-targeting ownership on the symlink target. -xdev stays on
+    # the same filesystem.
     if ! find "$PERSIST_DIR" -xdev -exec chown -h "$PUID:$PGID" {} +; then
         die "failed to chown $PERSIST_DIR to $PUID:$PGID. Check that PUID/PGID are valid numeric IDs and that the persistent volume is not mounted read-only."
     fi

@@ -6,19 +6,6 @@ description = "Full XFCE Linux desktop accessible from any modern web browser"
 [runtime.container]
 image = "Dockerfile"
 port = 3000
-# We need SYS_ADMIN so the bridge entrypoint can bind-mount
-# OPENHOST_APP_DATA_DIR over /config before s6-overlay starts. Webtop's
-# upstream Dockerfile declares /config as a VOLUME, so we can't replace
-# it with a symlink; Docker creates an anonymous volume there and bind-
-# mounts it into the container, and `rm -rf /config` fails with EBUSY on
-# the mountpoint itself.
-#
-# Security note: the webtop desktop already gives its user passwordless
-# sudo inside the container (a feature of the upstream image), so the
-# practical security impact of SYS_ADMIN is limited to what the
-# container runtime isolates anyway. We keep it off any other
-# capability.
-capabilities = ["SYS_ADMIN"]
 
 [resources]
 memory_mb = 4096

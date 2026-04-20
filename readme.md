@@ -6,12 +6,14 @@ browser, packaged as an OpenHost app.
 Under the hood this is
 [`linuxserver/webtop:ubuntu-xfce`](https://github.com/linuxserver/docker-webtop)
 with a thin bridge so webtop's `/config` persistence convention lines up
-with OpenHost's persistent-volume contract. The bridge bind-mounts
-`$OPENHOST_APP_DATA_DIR` over `/config` at startup (webtop's upstream
-Dockerfile declares `/config` as a Docker VOLUME, so a symlink won't
-work); this requires the `SYS_ADMIN` capability, which the manifest
-requests. TLS is terminated by the OpenHost router; only the upstream
-HTTP listener on port 3000 is exposed to the router.
+with OpenHost's persistent-volume contract. The bridge replaces `/config`
+with a symlink to `$OPENHOST_APP_DATA_DIR` at image build time; the
+upstream `VOLUME /config` directive then resolves through the symlink
+to the persistent path at `docker run`, and OpenHost's own `-v` bind
+mount already occupies that path, so webtop's `/config` ends up backed
+by the OpenHost persistent volume without any runtime mount gymnastics.
+TLS is terminated by the OpenHost router; only the upstream HTTP
+listener on port 3000 is exposed to the router.
 
 ## What you get
 
@@ -57,13 +59,8 @@ for persistent installs:
   who can access the desktop can become root inside the container. Do
   not add `public_paths` for this app unless you understand that
   implication.
-- The manifest requests the `SYS_ADMIN` Linux capability so the bridge
-  entrypoint can bind-mount `$OPENHOST_APP_DATA_DIR` over `/config`.
-  `SYS_ADMIN` is broad (see `man 7 capabilities`). Within a desktop
-  container that already hands the user passwordless root, the
-  incremental risk is minor; container-runtime isolation still applies.
-  If OpenHost ever adds first-class support for custom volume mount
-  destinations, we can drop this capability.
+- No extra Linux capabilities are requested; the image runs with
+  Docker's default capability set.
 
 ## Resource tuning
 
@@ -92,14 +89,10 @@ desktop apps at once. Edit `[resources]` in `openhost.toml` to adjust.
 - `openhost.toml` — OpenHost manifest.
 - `Dockerfile` — extends `lscr.io/linuxserver/webtop:ubuntu-xfce` with
   our bridge entrypoint.
-- `openhost-entrypoint.sh` — seeds `$OPENHOST_APP_DATA_DIR` from the
-  upstream `/config` baseline when the persistent dir is empty and
-  `/config` still has its baseline content. If the persistent dir is
-  empty but `/config` is also empty (unusual; no baseline to copy) the
-  entrypoint logs a message explaining the skip and continues. Bind-mounts the persistent
-  dir over `/config` and verifies the mount via device+inode
-  comparison (both idempotent across re-execs within the same
-  container). Runs a symlink-safe `chown` of the persistent dir (using
-  `find -xdev` to stay on the same filesystem, `chown -h` to avoid
-  following symlinks) once per container start, then hands off to
-  upstream s6-overlay.
+- `openhost-entrypoint.sh` — verifies that `/config` has been
+  replaced with a symlink to `$OPENHOST_APP_DATA_DIR` (set up by the
+  Dockerfile at build time). Seeds the persistent dir from
+  `/opt/webtop-baseline` (a copy of the baseline `/config` the image
+  shipped with) when the persistent dir is empty. Runs a symlink-safe
+  `chown` of the persistent dir (using `find -xdev` and `chown -h`)
+  once per container start, then hands off to upstream s6-overlay.
