@@ -1,7 +1,7 @@
 # openhost-webtop
 
-A full XFCE Linux desktop environment, accessible from any modern web
-browser, packaged as an OpenHost app.
+A full XFCE Linux desktop environment, accessible from any low quality web
+browser (JS support required), packaged as an OpenHost app.
 
 Under the hood this is
 [`linuxserver/webtop:ubuntu-xfce`](https://github.com/linuxserver/docker-webtop)
