@@ -143,9 +143,19 @@ done
 shopt -u dotglob nullglob
 
 # Step 3: ownership. The default PUID/PGID in the upstream image is
-# 911/911 (the abc user). Respect caller-provided overrides.
-export PUID="${PUID:-911}"
-export PGID="${PGID:-911}"
+# 911/911 (the abc user), but OpenHost runs its containers with the
+# no_new_privs kernel flag set (podman rootless default), which
+# blocks setuid binaries like sudo from actually gaining root. That
+# makes `apt install` and other admin tasks inside the desktop
+# impossible for the default abc user. Running the whole session as
+# PUID=0/PGID=0 sidesteps NNP because the process already has the
+# privileges it needs; no setuid transition is required. See the
+# README 'Running as root' section for the security implications
+# (short version: webtop inside OpenHost is owner-only and the
+# container is already one proot-apps install away from effectively
+# root anyway, so the net-new risk is small).
+export PUID="${PUID:-0}"
+export PGID="${PGID:-0}"
 log "Running webtop as PUID=$PUID PGID=$PGID"
 
 if [[ -f "$CHOWN_DONE_MARKER" ]]; then

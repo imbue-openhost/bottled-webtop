@@ -55,12 +55,19 @@ for persistent installs:
 
 - The container has no internal auth. Access is gated by OpenHost's
   built-in session auth, so only the compute space owner can reach it.
-- `sudo` inside the desktop is passwordless by upstream default. Anyone
-  who can access the desktop can become root inside the container. Do
-  not add `public_paths` for this app unless you understand that
-  implication.
+- The desktop session runs as root (`PUID=0 PGID=0`) by default.
+  OpenHost launches containers with the kernel `no_new_privs` flag
+  set (podman rootless default), which makes setuid binaries like
+  `sudo` refuse to elevate. Running the session as root directly
+  sidesteps that: every terminal is already root, and `apt install`
+  works without `sudo`. Override with `PUID`/`PGID` env vars if you
+  want to run as the `abc` user instead (and accept that `sudo`
+  will be broken).
 - No extra Linux capabilities are requested; the image runs with
   Docker's default capability set.
+- Do not add `public_paths` for this app. The desktop is a root
+  shell reachable by anyone who lands on the URL, so only the
+  authenticated zone owner should ever see it.
 
 ## Resource tuning
 
