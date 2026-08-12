@@ -1,18 +1,18 @@
-# openhost-webtop
+# bottled-webtop
 
 A full XFCE Linux desktop environment, accessible from any low quality web
-browser (JS support required), packaged as an OpenHost app.
+browser (JS support required), packaged as a Cloud in a Bottle app.
 
 Under the hood this is
 [`linuxserver/webtop:ubuntu-xfce`](https://github.com/linuxserver/docker-webtop)
 with a thin bridge so webtop's `/config` persistence convention lines up
-with OpenHost's persistent-volume contract. The bridge replaces `/config`
+with Cloud in a Bottle's persistent-volume contract. The bridge replaces `/config`
 with a symlink to `$OPENHOST_APP_DATA_DIR` at image build time; the
 upstream `VOLUME /config` directive then resolves through the symlink
-to the persistent path at `docker run`, and OpenHost's own `-v` bind
+to the persistent path at `docker run`, and Cloud in a Bottle's own `-v` bind
 mount already occupies that path, so webtop's `/config` ends up backed
-by the OpenHost persistent volume without any runtime mount gymnastics.
-TLS is terminated by the OpenHost router; only the upstream HTTP
+by the Cloud in a Bottle persistent volume without any runtime mount gymnastics.
+TLS is terminated by the Cloud in a Bottle router; only the upstream HTTP
 listener on port 3000 is exposed to the router.
 
 ## What you get
@@ -29,11 +29,11 @@ listener on port 3000 is exposed to the router.
 ## Deploying
 
 ```
-oh app deploy https://github.com/imbue-openhost/openhost-webtop --wait
+oh app deploy https://github.com/imbue-openhost/bottled-webtop --wait
 ```
 
 The app is available at `https://webtop.<zone-domain>/` and is gated
-behind OpenHost auth (no `public_paths` are declared).
+behind Cloud in a Bottle auth (no `public_paths` are declared).
 
 ## Installing applications
 
@@ -53,10 +53,10 @@ for persistent installs:
 
 ## Security
 
-- The container has no internal auth. Access is gated by OpenHost's
+- The container has no internal auth. Access is gated by Cloud in a Bottle's
   built-in session auth, so only the compute space owner can reach it.
 - The desktop session runs as root (`PUID=0 PGID=0`) by default.
-  OpenHost launches containers with the kernel `no_new_privs` flag
+  Cloud in a Bottle launches containers with the kernel `no_new_privs` flag
   set (podman rootless default), which makes setuid binaries like
   `sudo` refuse to elevate. Running the session as root directly
   sidesteps that: every terminal is already root, and `apt install`
@@ -77,11 +77,11 @@ desktop apps at once. Edit `[resources]` in `openhost.toml` to adjust.
 
 ## Known limitations
 
-- **No `--shm-size` control.** OpenHost's manifest spec does not expose
+- **No `--shm-size` control.** Cloud in a Bottle's manifest spec does not expose
   Docker's `--shm-size` flag. The container runs with Docker's 64 MiB
   default. This is noticeable in Chromium with many tabs open but is
   otherwise fine for typical usage. The upstream webtop documentation
-  recommends 1 GiB here; if OpenHost adds a manifest field for it, bump
+  recommends 1 GiB here; if Cloud in a Bottle adds a manifest field for it, bump
   this.
 
 - **No GPU acceleration.** The `devices` and `gpu` manifest fields
@@ -93,7 +93,7 @@ desktop apps at once. Edit `[resources]` in `openhost.toml` to adjust.
 
 ## Files
 
-- `openhost.toml` — OpenHost manifest.
+- `openhost.toml` — Cloud in a Bottle manifest.
 - `Dockerfile` — extends `lscr.io/linuxserver/webtop:ubuntu-xfce` with
   our bridge entrypoint.
 - `openhost-entrypoint.sh` — verifies that `/config` has been
